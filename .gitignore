@@ -1,0 +1,18 @@
+# Node
+node_modules
+
+# Env files
+.env
+.env.local
+.env.production
+
+# Next.js
+.next
+out
+
+# Prisma
+prisma/dev.db
+*.sqlite
+
+# OS
+.DS_Store

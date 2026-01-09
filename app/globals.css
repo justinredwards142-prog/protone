@@ -1,0 +1,69 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Body styling */
+body {
+  @apply bg-gray-50 text-gray-900 font-sans;
+}
+
+/* Textarea & Select common styling */
+textarea,
+select {
+  @apply w-full p-4 rounded-xl border border-gray-300 shadow-sm focus:outline-none focus:ring-2 focus:ring-purple-500;
+  @apply bg-white text-gray-900;
+  @apply placeholder:text-gray-400;
+  @apply dark:bg-zinc-900 dark:text-zinc-100 dark:border-zinc-700 dark:placeholder:text-zinc-400;
+}
+
+/* Buttons (global defaults) */
+button {
+  @apply rounded-xl font-semibold transition-all duration-150;
+}
+
+/* Output box */
+.output-box {
+  @apply mt-4 p-5 border border-gray-300 rounded-xl bg-white shadow-sm whitespace-pre-wrap break-words;
+  @apply dark:bg-zinc-900 dark:border-zinc-700;
+}
+
+/* Copy button */
+.copy-button {
+  @apply bg-purple-600 hover:bg-purple-700 text-white px-3 py-1 rounded-lg text-sm;
+  @apply active:scale-[0.99];
+}
+
+/* Limit / info boxes */
+.notice-box {
+  @apply bg-purple-100 border border-purple-300 rounded-xl p-4 text-center;
+  @apply dark:bg-purple-950/40 dark:border-purple-900;
+}
+
+/* Reveal animation (micro-polish) */
+@layer utilities {
+  @keyframes reveal {
+    from { opacity: 0; transform: translateY(6px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+
+  .reveal {
+    animation: reveal 220ms ease-out both;
+  }
+
+  @keyframes cursorBlink {
+    0%, 49% { opacity: 1; }
+    50%, 100% { opacity: 0; }
+  }
+
+  .cursor {
+    display: inline-block;
+    margin-left: 2px;
+    animation: cursorBlink 900ms step-end infinite;
+    opacity: 0.9;
+  }
+}
+
+/* Logo SVG */
+svg {
+  @apply rounded-full;
+}
