@@ -6,6 +6,8 @@ import { signOut, useSession } from "next-auth/react"
 
 const WEEKLY_LIMIT = 10
 
+type Cap = number | "Unlimited"
+
 function getTypeDelayForLen(len: number) {
   if (len > 900) return 4
   if (len > 500) return 7
@@ -27,11 +29,11 @@ export default function Home() {
   const [hasRewritten, setHasRewritten] = useState(false)
   const [isTyping, setIsTyping] = useState(false)
 
-  // Premium + usage snapshot (server-truth)
-  const [isPremium, setIsPremium] = useState(false)
+  // Server-truth usage snapshot
   const [weeklyUsed, setWeeklyUsed] = useState<number | null>(null)
-  const [weeklyLimit, setWeeklyLimit] = useState<number>(WEEKLY_LIMIT)
-  const [remaining, setRemaining] = useState<number | null>(null)
+  const [weeklyLimit, setWeeklyLimit] = useState<Cap>(WEEKLY_LIMIT)
+  const [remaining, setRemaining] = useState<Cap | null>(null)
+  const [isPremium, setIsPremium] = useState(false)
 
   // Dark mode
   const [theme, setTheme] = useState<"light" | "dark">("light")
@@ -39,17 +41,25 @@ export default function Home() {
   const typingIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
   const signedIn = status === "authenticated"
-  const limitReached = signedIn && !isPremium && remaining !== null && remaining <= 0
+  const limitReached = signedIn && !isPremium && typeof remaining === "number" && remaining <= 0
 
   const remainingLabel = useMemo(() => {
     if (!signedIn) return "Sign in to get started"
-    if (isPremium) return "Premium: Unlimited"
+    if (isPremium) return "Unlimited"
 
     if (typeof weeklyUsed === "number") {
-      const left = typeof remaining === "number" ? ` • ${remaining} left this week` : ""
-      return `Used ${weeklyUsed} / ${weeklyLimit}${left}`
+      const cap = typeof weeklyLimit === "number" ? weeklyLimit : WEEKLY_LIMIT
+      const left =
+        typeof remaining === "number"
+          ? ` • ${remaining} left this week`
+          : remaining === "Unlimited"
+            ? ` • Unlimited`
+            : ""
+      return `Used ${weeklyUsed} / ${cap}${left}`
     }
-    return `Used … / ${weeklyLimit}`
+
+    const cap = typeof weeklyLimit === "number" ? weeklyLimit : WEEKLY_LIMIT
+    return `Used … / ${cap}`
   }, [signedIn, isPremium, weeklyUsed, weeklyLimit, remaining])
 
   // Theme init
@@ -68,39 +78,6 @@ export default function Home() {
     }
   }, [])
 
-  // Fetch usage snapshot on login (so banner is correct after logout/login)
-  useEffect(() => {
-    if (status !== "authenticated") {
-      setIsPremium(false)
-      setWeeklyUsed(null)
-      setRemaining(null)
-      setWeeklyLimit(WEEKLY_LIMIT)
-      return
-    }
-
-    ;(async () => {
-      try {
-        const res = await fetch("/api/usage")
-        if (!res.ok) return
-        const data = await res.json()
-
-        if (typeof data?.isPremium === "boolean") setIsPremium(data.isPremium)
-
-        if (typeof data?.used === "number") setWeeklyUsed(data.used)
-        if (typeof data?.limit === "number") setWeeklyLimit(data.limit)
-        if (typeof data?.remaining === "number") setRemaining(data.remaining)
-
-        // For premium responses where used/remaining might be null, keep UI sane
-        if (data?.isPremium === true) {
-          setWeeklyUsed(0)
-          setRemaining(null)
-        }
-      } catch {
-        // ignore
-      }
-    })()
-  }, [status])
-
   const toggleTheme = () => {
     const next = theme === "dark" ? "light" : "dark"
     setTheme(next)
@@ -112,22 +89,74 @@ export default function Home() {
     window.location.href = "/signin"
   }
 
+  const fetchUsage = async () => {
+    try {
+      const res = await fetch("/api/usage", { cache: "no-store" })
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok) return false
+
+      if (typeof data?.used === "number") setWeeklyUsed(data.used)
+      if (data?.limit === "Unlimited" || typeof data?.limit === "number") setWeeklyLimit(data.limit)
+      if (data?.remaining === "Unlimited" || typeof data?.remaining === "number") setRemaining(data.remaining)
+      if (typeof data?.isPremium === "boolean") setIsPremium(data.isPremium)
+      return true
+    } catch {
+      return false
+    }
+  }
+
+  // Fetch usage snapshot on login
+  useEffect(() => {
+    if (status !== "authenticated") {
+      setWeeklyUsed(null)
+      setRemaining(null)
+      setWeeklyLimit(WEEKLY_LIMIT)
+      setIsPremium(false)
+      return
+    }
+
+    void fetchUsage()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [status])
+
+  // ✅ Stripe success redirect: refresh usage then remove query params
+  useEffect(() => {
+    if (status !== "authenticated") return
+    if (typeof window === "undefined") return
+
+    const url = new URL(window.location.href)
+    const success = url.searchParams.get("success")
+    if (success !== "1") return
+
+    ;(async () => {
+      await fetchUsage()
+      // remove query params so it doesn't keep refreshing
+      url.searchParams.delete("success")
+      url.searchParams.delete("session_id")
+      url.searchParams.delete("canceled")
+      window.history.replaceState({}, "", url.pathname + (url.search ? `?${url.searchParams.toString()}` : ""))
+    })()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [status])
+
   const upgrade = async () => {
     if (!signedIn) {
       goToSignIn()
       return
     }
-    try {
-      const res = await fetch("/api/checkout", { method: "POST" })
-      const data = await res.json().catch(() => ({}))
-      if (data?.url) {
-        window.location.href = data.url
-        return
-      }
-      alert(data?.error || "Checkout unavailable")
-    } catch {
-      alert("Checkout unavailable")
+    const res = await fetch("/api/checkout", { method: "POST" })
+    const data = await res.json()
+    if (data?.url) window.location.href = data.url
+  }
+
+  const manageBilling = async () => {
+    if (!signedIn) {
+      goToSignIn()
+      return
     }
+    const res = await fetch("/api/billing-portal", { method: "POST" })
+    const data = await res.json()
+    if (data?.url) window.location.href = data.url
   }
 
   const rewrite = async () => {
@@ -161,15 +190,10 @@ export default function Home() {
       const data = await res.json().catch(() => ({}))
 
       // ✅ Always sync from server truth (works for 200 + 429)
-      if (typeof data?.isPremium === "boolean") setIsPremium(data.isPremium)
       if (typeof data?.used === "number") setWeeklyUsed(data.used)
-      if (typeof data?.limit === "number") setWeeklyLimit(data.limit)
-      if (typeof data?.remaining === "number") setRemaining(data.remaining)
-
-      if (data?.isPremium === true) {
-        setWeeklyUsed(0)
-        setRemaining(null)
-      }
+      if (data?.limit === "Unlimited" || typeof data?.limit === "number") setWeeklyLimit(data.limit)
+      if (data?.remaining === "Unlimited" || typeof data?.remaining === "number") setRemaining(data.remaining)
+      if (typeof data?.isPremium === "boolean") setIsPremium(data.isPremium)
 
       if (!res.ok) {
         const msg = data?.error || data?.result || "Request failed"
@@ -197,7 +221,6 @@ export default function Home() {
         }
       }, delay)
 
-      // Fun confetti
       if (mode === "fun") {
         confetti({
           particleCount: 40,
@@ -219,7 +242,7 @@ export default function Home() {
   return (
     <div className="min-h-screen px-4 py-10 bg-gray-50 text-gray-900 dark:bg-zinc-950 dark:text-zinc-100">
       <div className="max-w-xl mx-auto space-y-8">
-        {/* Header row: logo + auth + theme toggle */}
+        {/* Header */}
         <div className="flex items-center justify-between gap-3">
           <div className="flex items-center gap-4">
             <div className="w-14 h-14">
@@ -241,8 +264,7 @@ export default function Home() {
                 </span>
                 <button
                   onClick={() => signOut({ callbackUrl: "/" })}
-                  className="px-3 py-2 rounded-xl border border-gray-200 bg-white shadow-sm hover:shadow-md transition-all
-                             dark:bg-zinc-900 dark:border-zinc-700"
+                  className="px-3 py-2 rounded-xl border border-gray-200 bg-white shadow-sm hover:shadow-md transition-all dark:bg-zinc-900 dark:border-zinc-700"
                   type="button"
                 >
                   Sign out
@@ -251,8 +273,7 @@ export default function Home() {
             ) : (
               <button
                 onClick={goToSignIn}
-                className="px-3 py-2 rounded-xl border border-gray-200 bg-white shadow-sm hover:shadow-md transition-all
-                           dark:bg-zinc-900 dark:border-zinc-700"
+                className="px-3 py-2 rounded-xl border border-gray-200 bg-white shadow-sm hover:shadow-md transition-all dark:bg-zinc-900 dark:border-zinc-700"
                 type="button"
               >
                 Sign in
@@ -261,8 +282,7 @@ export default function Home() {
 
             <button
               onClick={toggleTheme}
-              className="px-3 py-2 rounded-xl border border-gray-200 bg-white shadow-sm hover:shadow-md transition-all
-                         dark:bg-zinc-900 dark:border-zinc-700"
+              className="px-3 py-2 rounded-xl border border-gray-200 bg-white shadow-sm hover:shadow-md transition-all dark:bg-zinc-900 dark:border-zinc-700"
               aria-label="Toggle dark mode"
               type="button"
             >
@@ -271,7 +291,7 @@ export default function Home() {
           </div>
         </div>
 
-        {/* Branded intro */}
+        {/* Intro */}
         <div className="reveal bg-white border border-gray-200 rounded-xl p-4 text-center shadow-sm dark:bg-zinc-900 dark:border-zinc-700">
           <p className="text-base font-medium text-gray-700 dark:text-zinc-200">
             Rewrite messages instantly with the right tone —{" "}
@@ -283,7 +303,7 @@ export default function Home() {
               <p>
                 {isPremium ? (
                   <>
-                    <span className="font-semibold">Premium</span>: Unlimited rewrites.
+                    Premium: <span className="font-semibold">Unlimited rewrites</span>.
                   </>
                 ) : (
                   <>
@@ -312,7 +332,7 @@ export default function Home() {
           <p className="text-xs text-gray-500 dark:text-zinc-400">🔒 Your messages are not stored or saved.</p>
         </div>
 
-        {/* Controls (stacked) */}
+        {/* Controls */}
         <div className="space-y-3">
           <div className="space-y-1">
             <label className="font-semibold text-gray-700 dark:text-zinc-200">Mode</label>
@@ -324,8 +344,8 @@ export default function Home() {
                 setTone(m === "normal" ? "professional" : "5yearold")
               }}
             >
-              <option value="normal">Normal ({remainingLabel})</option>
-              <option value="fun">Fun 🎉 ({remainingLabel})</option>
+              <option value="normal">Normal ({isPremium ? "Unlimited" : remainingLabel})</option>
+              <option value="fun">Fun 🎉 ({isPremium ? "Unlimited" : remainingLabel})</option>
             </select>
           </div>
 
@@ -369,19 +389,46 @@ export default function Home() {
           </div>
         </div>
 
-        {/* Limit notice + direct upgrade CTA */}
-        {limitReached && (
-          <div className="notice-box reveal space-y-3">
-            <p className="font-semibold text-purple-800 dark:text-purple-200">
-              You’ve used all your free rewrites for this week
-            </p>
-            <button
-              onClick={upgrade}
-              className="bg-purple-600 hover:bg-purple-700 text-white px-4 py-2 rounded-xl font-semibold"
-              type="button"
-            >
-              Upgrade to Premium for unlimited
-            </button>
+        {/* Upgrade / Manage billing box */}
+        {signedIn && (
+          <div className="reveal bg-purple-50 border border-purple-200 rounded-2xl p-5 text-center space-y-3 dark:bg-purple-950/30 dark:border-purple-900">
+            {isPremium ? (
+              <>
+                <p className="text-lg font-semibold text-purple-800 dark:text-purple-200">✅ You’re Premium</p>
+                <p className="text-purple-700 dark:text-purple-200/90">Unlimited rewrites. Manage your subscription anytime.</p>
+                <button
+                  onClick={manageBilling}
+                  className="bg-purple-600 hover:bg-purple-700 text-white px-6 py-3 rounded-xl font-semibold transition-all duration-150 active:scale-[0.99]"
+                  type="button"
+                >
+                  Manage billing
+                </button>
+              </>
+            ) : (
+              <>
+                {limitReached ? (
+                  <>
+                    <p className="text-lg font-semibold text-purple-800 dark:text-purple-200">
+                      You’ve used all your free rewrites for this week
+                    </p>
+                    <p className="text-purple-700 dark:text-purple-200/90">Upgrade to Premium for unlimited rewrites.</p>
+                  </>
+                ) : (
+                  <>
+                    <p className="text-lg font-semibold text-purple-800 dark:text-purple-200">🚀 Go unlimited with Premium</p>
+                    <p className="text-purple-700 dark:text-purple-200/90">Unlimited rewrites, no weekly limits.</p>
+                  </>
+                )}
+
+                <button
+                  onClick={upgrade}
+                  className="bg-purple-600 hover:bg-purple-700 text-white px-6 py-3 rounded-xl font-semibold transition-all duration-150 active:scale-[0.99]"
+                  type="button"
+                >
+                  Upgrade to Premium (£5/mo)
+                </button>
+              </>
+            )}
           </div>
         )}
 
@@ -395,22 +442,6 @@ export default function Home() {
         >
           {loading ? "Rewriting…" : signedIn ? "Rewrite" : "Sign in to rewrite"}
         </button>
-
-        {/* Premium upsell card (shown when signed in and not premium) */}
-        {signedIn && !isPremium && (
-          <div className="reveal bg-purple-50 border border-purple-200 rounded-2xl p-5 text-center space-y-3 dark:bg-purple-950/30 dark:border-purple-900">
-            <p className="text-lg font-semibold text-purple-800 dark:text-purple-200">🚀 Go unlimited with ProTone Premium</p>
-            <p className="text-purple-700 dark:text-purple-200/90">Unlimited rewrites — no weekly limits.</p>
-            <button
-              onClick={upgrade}
-              className="bg-purple-600 hover:bg-purple-700 text-white px-6 py-3 rounded-xl font-semibold
-                         transition-all duration-150 active:scale-[0.99]"
-              type="button"
-            >
-              Upgrade to Premium
-            </button>
-          </div>
-        )}
 
         {/* Testimonials BEFORE rewrite */}
         {!hasRewritten && <Testimonials />}
@@ -431,7 +462,6 @@ export default function Home() {
               </div>
             </div>
 
-            {/* Testimonials AFTER rewrite */}
             <Testimonials />
           </>
         )}
