@@ -1,48 +1,73 @@
-import Database from "better-sqlite3"
-import crypto from "crypto"
+// lib/usage.ts
+import { prisma } from "@/lib/prisma"
 
-const db = new Database("protone.sqlite")
+export const FREE_WEEKLY_LIMIT = 10
 
-db.exec(`
-CREATE TABLE IF NOT EXISTS usage_weekly (
-  user_id TEXT NOT NULL,
-  week_key TEXT NOT NULL,
-  used INTEGER NOT NULL DEFAULT 0,
-  PRIMARY KEY (user_id, week_key)
-);
-`)
-
-// Monday-start week key in UTC (good enough for UK; later we can do true Europe/London if needed)
-export function weekKeyMondayUTC(d = new Date()) {
-  const date = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()))
-  const day = date.getUTCDay() // 0=Sun..6=Sat
-  const diff = day === 0 ? -6 : 1 - day
-  date.setUTCDate(date.getUTCDate() + diff)
-  // YYYY-MM-DD
-  const y = date.getUTCFullYear()
-  const m = String(date.getUTCMonth() + 1).padStart(2, "0")
-  const dd = String(date.getUTCDate()).padStart(2, "0")
-  return `${y}-${m}-${dd}`
+// Monday 00:00 UTC week key, e.g. "2026-01-05"
+export function weekKeyMondayUTC(date = new Date()): string {
+  const d = new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()))
+  const day = d.getUTCDay() // 0=Sun, 1=Mon
+  const diffToMonday = (day + 6) % 7 // Mon->0, Tue->1, ... Sun->6
+  d.setUTCDate(d.getUTCDate() - diffToMonday)
+  return d.toISOString().slice(0, 10)
 }
 
-export function newAnonId() {
-  return crypto.randomUUID()
+export async function getWeeklyUsage(userId: string) {
+  const key = weekKeyMondayUTC()
+
+  const row = await prisma.weeklyUsage.upsert({
+    where: { userId_weekKey: { userId, weekKey: key } },
+    update: {},
+    create: { userId, weekKey: key, used: 0 },
+    select: { used: true },
+  })
+
+  return { used: row.used, weekKey: key }
 }
 
-export function getWeeklyUsed(userId: string, weekKey: string) {
-  const row = db
-    .prepare("SELECT used FROM usage_weekly WHERE user_id = ? AND week_key = ?")
-    .get(userId, weekKey) as { used: number } | undefined
-  return row?.used ?? 0
+/**
+ * Atomically increments usage by 1 for the current week.
+ * Returns the new used count.
+ */
+export async function reserveWeeklyUsage(userId: string) {
+  const key = weekKeyMondayUTC()
+
+  // Ensure row exists
+  await prisma.weeklyUsage.upsert({
+    where: { userId_weekKey: { userId, weekKey: key } },
+    update: {},
+    create: { userId, weekKey: key, used: 0 },
+  })
+
+  const updated = await prisma.weeklyUsage.update({
+    where: { userId_weekKey: { userId, weekKey: key } },
+    data: { used: { increment: 1 } },
+    select: { used: true },
+  })
+
+  return { used: updated.used, weekKey: key }
 }
 
-export function incrementWeeklyUsed(userId: string, weekKey: string) {
-  // upsert then increment atomically
-  db.prepare(
-    "INSERT INTO usage_weekly (user_id, week_key, used) VALUES (?, ?, 0) ON CONFLICT(user_id, week_key) DO NOTHING"
-  ).run(userId, weekKey)
+/**
+ * Decrements usage by 1 (min 0). Useful if OpenAI fails after we reserved.
+ */
+export async function rollbackWeeklyUsage(userId: string) {
+  const key = weekKeyMondayUTC()
 
-  db.prepare("UPDATE usage_weekly SET used = used + 1 WHERE user_id = ? AND week_key = ?").run(userId, weekKey)
+  const row = await prisma.weeklyUsage.findUnique({
+    where: { userId_weekKey: { userId, weekKey: key } },
+    select: { used: true },
+  })
 
-  return getWeeklyUsed(userId, weekKey)
+  if (!row) return { used: 0, weekKey: key }
+
+  const nextUsed = Math.max(0, row.used - 1)
+
+  const updated = await prisma.weeklyUsage.update({
+    where: { userId_weekKey: { userId, weekKey: key } },
+    data: { used: nextUsed },
+    select: { used: true },
+  })
+
+  return { used: updated.used, weekKey: key }
 }
