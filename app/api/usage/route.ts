@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server"
 import { getServerSession } from "next-auth/next"
-import { authOptions } from "@/auth"
+import { buildAuthOptions } from "@/auth"
 import { prisma } from "@/lib/prisma"
 import { getWeeklyUsage, weekKeyMondayUTC } from "@/lib/usage"
 
@@ -16,7 +16,7 @@ type UsagePayload = {
 }
 
 export async function GET() {
-  const session = await getServerSession(authOptions)
+  const session = await getServerSession(buildAuthOptions())
   const email = session?.user?.email
   if (!email) {
     const payload: UsagePayload = { used: 0, limit: WEEKLY_LIMIT, remaining: WEEKLY_LIMIT, isPremium: false }
@@ -33,9 +33,7 @@ export async function GET() {
     return NextResponse.json(payload, { status: 401 })
   }
 
-  const isPremium = Boolean(user.isPremium)
-
-  if (isPremium) {
+  if (user.isPremium) {
     const payload: UsagePayload = { used: 0, limit: "Unlimited", remaining: "Unlimited", isPremium: true }
     return NextResponse.json(payload)
   }

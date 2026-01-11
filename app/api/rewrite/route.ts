@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server"
 import OpenAI from "openai"
 import { getServerSession } from "next-auth/next"
-import { authOptions } from "@/auth"
+import { buildAuthOptions } from "@/auth"
 import { prisma } from "@/lib/prisma"
 import { reserveWeeklyUsage, rollbackWeeklyUsage } from "@/lib/usage"
 
@@ -37,8 +37,7 @@ function cleanStr(v: unknown, max = 6000) {
 }
 
 export async function POST(req: Request) {
-  // 1) Must be signed in (NextAuth v4)
-  const session = await getServerSession(authOptions)
+  const session = await getServerSession(buildAuthOptions())
   const email = session?.user?.email
   if (!email) {
     const payload: RewritePayload = {
@@ -51,7 +50,6 @@ export async function POST(req: Request) {
     return NextResponse.json(payload, { status: 401 })
   }
 
-  // 2) Resolve DB user + premium status
   const user = await prisma.user.findUnique({
     where: { email },
     select: { id: true, isPremium: true },
@@ -81,19 +79,14 @@ export async function POST(req: Request) {
     const mode = cleanStr(body?.mode, 20)
     const tone = cleanStr(body?.tone, 40)
 
-    if (!input) {
-      return NextResponse.json({ error: "Missing input." } satisfies RewritePayload, { status: 400 })
-    }
-    if (!MODES.has(mode)) {
-      return NextResponse.json({ error: "Invalid mode." } satisfies RewritePayload, { status: 400 })
-    }
+    if (!input) return NextResponse.json({ error: "Missing input." } satisfies RewritePayload, { status: 400 })
+    if (!MODES.has(mode)) return NextResponse.json({ error: "Invalid mode." } satisfies RewritePayload, { status: 400 })
 
     const toneOk = mode === "normal" ? NORMAL_TONES.has(tone) : FUN_TONES.has(tone)
     if (!toneOk) {
       return NextResponse.json({ error: "Invalid tone for selected mode." } satisfies RewritePayload, { status: 400 })
     }
 
-    // 3) Reserve weekly usage slot (free users only)
     let used = 0
     let remaining: number | "Unlimited" = WEEKLY_LIMIT
     let limit: number | "Unlimited" = WEEKLY_LIMIT
@@ -122,7 +115,6 @@ export async function POST(req: Request) {
       limit = "Unlimited"
     }
 
-    // 4) Call OpenAI
     const system =
       "You rewrite messages. Output ONLY the rewritten message. " +
       "Preserve key details, names, dates, and intent. Do not add disclaimers."
@@ -148,15 +140,13 @@ export async function POST(req: Request) {
 
     const result = response.choices?.[0]?.message?.content?.trim() || "No response"
 
-    const payload: RewritePayload = {
+    return NextResponse.json({
       result,
       used,
       limit,
       remaining,
       isPremium,
-    }
-
-    return NextResponse.json(payload)
+    } satisfies RewritePayload)
   } catch {
     if (reserved && reservedWeekKey) {
       await rollbackWeeklyUsage(user.id, reservedWeekKey)
