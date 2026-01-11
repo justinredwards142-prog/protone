@@ -1,73 +1,77 @@
 // lib/usage.ts
 import { prisma } from "@/lib/prisma"
 
-export const FREE_WEEKLY_LIMIT = 10
-
-// Monday 00:00 UTC week key, e.g. "2026-01-05"
-export function weekKeyMondayUTC(date = new Date()): string {
+export function weekKeyMondayUTC(date = new Date()) {
+  // Monday-based week key in UTC: YYYY-MM-DD of Monday
   const d = new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()))
-  const day = d.getUTCDay() // 0=Sun, 1=Mon
+  const day = d.getUTCDay() // 0=Sun ... 6=Sat
   const diffToMonday = (day + 6) % 7 // Mon->0, Tue->1, ... Sun->6
   d.setUTCDate(d.getUTCDate() - diffToMonday)
-  return d.toISOString().slice(0, 10)
+
+  const y = d.getUTCFullYear()
+  const m = String(d.getUTCMonth() + 1).padStart(2, "0")
+  const dd = String(d.getUTCDate()).padStart(2, "0")
+  return `${y}-${m}-${dd}`
 }
 
-export async function getWeeklyUsage(userId: string) {
-  const key = weekKeyMondayUTC()
-
-  const row = await prisma.weeklyUsage.upsert({
-    where: { userId_weekKey: { userId, weekKey: key } },
-    update: {},
-    create: { userId, weekKey: key, used: 0 },
-    select: { used: true },
-  })
-
-  return { used: row.used, weekKey: key }
-}
-
-/**
- * Atomically increments usage by 1 for the current week.
- * Returns the new used count.
- */
-export async function reserveWeeklyUsage(userId: string) {
-  const key = weekKeyMondayUTC()
-
-  // Ensure row exists
-  await prisma.weeklyUsage.upsert({
-    where: { userId_weekKey: { userId, weekKey: key } },
-    update: {},
-    create: { userId, weekKey: key, used: 0 },
-  })
-
-  const updated = await prisma.weeklyUsage.update({
-    where: { userId_weekKey: { userId, weekKey: key } },
-    data: { used: { increment: 1 } },
-    select: { used: true },
-  })
-
-  return { used: updated.used, weekKey: key }
-}
-
-/**
- * Decrements usage by 1 (min 0). Useful if OpenAI fails after we reserved.
- */
-export async function rollbackWeeklyUsage(userId: string) {
-  const key = weekKeyMondayUTC()
-
+export async function getWeeklyUsage(userId: string, weekKey: string) {
   const row = await prisma.weeklyUsage.findUnique({
-    where: { userId_weekKey: { userId, weekKey: key } },
+    where: { userId_weekKey: { userId, weekKey } },
     select: { used: true },
   })
+  return row?.used ?? 0
+}
 
-  if (!row) return { used: 0, weekKey: key }
+/**
+ * Atomically "reserves" 1 usage for this user/week.
+ * Returns ok=false if user is already at/over limit.
+ */
+export async function reserveWeeklyUsage(opts: { userId: string; limit: number }) {
+  const weekKey = weekKeyMondayUTC()
 
-  const nextUsed = Math.max(0, row.used - 1)
+  const result = await prisma.$transaction(async (tx) => {
+    const existing = await tx.weeklyUsage.findUnique({
+      where: { userId_weekKey: { userId: opts.userId, weekKey } },
+      select: { id: true, used: true },
+    })
 
-  const updated = await prisma.weeklyUsage.update({
-    where: { userId_weekKey: { userId, weekKey: key } },
-    data: { used: nextUsed },
-    select: { used: true },
+    const usedNow = existing?.used ?? 0
+    if (usedNow >= opts.limit) {
+      return { ok: false as const, used: usedNow, remaining: 0, weekKey }
+    }
+
+    const updated = await tx.weeklyUsage.upsert({
+      where: { userId_weekKey: { userId: opts.userId, weekKey } },
+      create: { userId: opts.userId, weekKey, used: 1 },
+      update: { used: { increment: 1 } },
+      select: { used: true },
+    })
+
+    const remaining = Math.max(0, opts.limit - updated.used)
+    return { ok: true as const, used: updated.used, remaining, weekKey }
   })
 
-  return { used: updated.used, weekKey: key }
+  return result
+}
+
+/**
+ * If OpenAI fails after reserving, roll back that 1 usage.
+ */
+export async function rollbackWeeklyUsage(userId: string, weekKey: string) {
+  await prisma.$transaction(async (tx) => {
+    const row = await tx.weeklyUsage.findUnique({
+      where: { userId_weekKey: { userId, weekKey } },
+      select: { used: true },
+    })
+    if (!row) return
+
+    if (row.used <= 1) {
+      await tx.weeklyUsage.delete({ where: { userId_weekKey: { userId, weekKey } } })
+    } else {
+      await tx.weeklyUsage.update({
+        where: { userId_weekKey: { userId, weekKey } },
+        data: { used: { decrement: 1 } },
+      })
+    }
+  })
 }

@@ -1,69 +1,78 @@
+// auth.ts
 import type { NextAuthOptions } from "next-auth"
-import NextAuth from "next-auth"
 import EmailProvider from "next-auth/providers/email"
 import { PrismaAdapter } from "@auth/prisma-adapter"
 import { prisma } from "@/lib/prisma"
 import { Resend } from "resend"
 
-const resend = new Resend(process.env.RESEND_API_KEY!)
+function safeEnv(name: string) {
+  // IMPORTANT: do NOT throw here (build must not crash).
+  // Return empty string if missing; runtime will show a useful error in server logs.
+  return process.env[name] ?? ""
+}
 
 export const authOptions: NextAuthOptions = {
   adapter: PrismaAdapter(prisma),
-  session: { strategy: "database" },
-  debug: true,
 
-    pages: {
-    signIn: "/signin",
-  },
+  // Do not crash builds if missing; NextAuth will behave oddly if missing,
+  // but we’ll keep build green and you’ll set env vars in Vercel.
+  secret: safeEnv("NEXTAUTH_SECRET"),
+
+  session: { strategy: "jwt" },
 
   providers: [
     EmailProvider({
-      // Dummy SMTP values (required by type, not used)
-      server: {
-        host: "smtp.resend.com",
-        port: 587,
-        auth: { user: "resend", pass: "resend" },
-      },
-      from: process.env.EMAIL_FROM,
+      from: safeEnv("EMAIL_FROM") || "ProTone <onboarding@resend.dev>",
 
+      // We use a custom sender via Resend so we don't need SMTP.
       async sendVerificationRequest({ identifier, url }) {
-        if (!process.env.RESEND_API_KEY) {
-          throw new Error("RESEND_API_KEY is missing")
-        }
-        if (!process.env.EMAIL_FROM) {
-          throw new Error("EMAIL_FROM is missing")
+        const apiKey = safeEnv("RESEND_API_KEY")
+        if (!apiKey) {
+          console.error("Missing RESEND_API_KEY (email sign-in will not work).")
+          return
         }
 
-        const resp = await resend.emails.send({
-          from: process.env.EMAIL_FROM,
-          to: identifier,
-          subject: "Sign in to ProTone",
-          html: `
-            <div style="font-family: system-ui, sans-serif; line-height:1.5">
-              <h2>Sign in to ProTone</h2>
-              <p>Click the button below to sign in:</p>
-              <p style="margin:20px 0">
-                <a href="${url}" style="background:#7C3AED;color:white;padding:10px 14px;border-radius:10px;text-decoration:none;display:inline-block;">
-                  Sign in
-                </a>
-              </p>
-              <p>If you didn’t request this, you can ignore this email.</p>
-            </div>
-          `,
+        const resend = new Resend(apiKey)
+
+        const to = identifier
+        const subject = "Your ProTone sign-in link"
+
+        // Keep it simple (and robust)
+        const html = `
+          <div style="font-family:system-ui,Segoe UI,Roboto,Helvetica,Arial,sans-serif;line-height:1.5">
+            <h2 style="margin:0 0 12px">Sign in to ProTone</h2>
+            <p style="margin:0 0 16px">Click the link below to sign in:</p>
+            <p style="margin:0 0 16px">
+              <a href="${url}" style="display:inline-block;padding:10px 14px;border-radius:10px;background:#7c3aed;color:#fff;text-decoration:none">
+                Sign in
+              </a>
+            </p>
+            <p style="margin:0;color:#666;font-size:12px">If you didn’t request this, you can ignore this email.</p>
+          </div>
+        `
+
+        await resend.emails.send({
+          from: safeEnv("EMAIL_FROM") || "ProTone <onboarding@resend.dev>",
+          to,
+          subject,
+          html,
         })
-
-        // Resend returns either { id: string } or { error: ... }
-        const maybeError = (resp as any)?.error
-        if (maybeError) {
-          console.error("Resend sendVerificationRequest failed:", maybeError)
-          throw new Error(
-            typeof maybeError?.message === "string" ? maybeError.message : "Resend failed"
-          )
-        }
       },
     }),
   ],
-}
 
-const handler = NextAuth(authOptions)
-export { handler }
+  pages: {
+    signIn: "/signin",
+    verifyRequest: "/signin?check=1",
+  },
+
+  callbacks: {
+    async session({ session, token }) {
+      // Keep current behavior: session.user.email remains available
+      if (session.user && token?.sub) {
+        ;(session.user as any).id = token.sub
+      }
+      return session
+    },
+  },
+}

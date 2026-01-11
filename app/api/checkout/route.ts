@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server"
-import { getServerSession } from "next-auth"
+import { getServerSession } from "next-auth/next"
 import { authOptions } from "@/auth"
 import { prisma } from "@/lib/prisma"
 import { stripe } from "@/lib/stripe"
@@ -23,19 +23,28 @@ export async function POST() {
     return NextResponse.json({ error: "Missing APP_URL or STRIPE_PRICE_ID" }, { status: 500 })
   }
 
+  // If already premium, you typically send them to a billing portal.
+  // For now, return a friendly message (or create /api/billing-portal later).
+  if (user.isPremium) {
+    return NextResponse.json({ error: "You already have Premium." }, { status: 400 })
+  }
+
   // Ensure customer exists + always has metadata.userId
   let customerId = user.stripeCustomerId
+
   if (!customerId) {
     const customer = await stripe.customers.create({
       email: user.email,
       metadata: { userId: user.id },
     })
     customerId = customer.id
+
     await prisma.user.update({
       where: { id: user.id },
       data: { stripeCustomerId: customerId },
     })
   } else {
+    // keep metadata in sync
     await stripe.customers.update(customerId, {
       email: user.email,
       metadata: { userId: user.id },
@@ -49,8 +58,10 @@ export async function POST() {
     metadata: { userId: user.id },
     line_items: [{ price: priceId, quantity: 1 }],
     allow_promotion_codes: true,
-    success_url: `${appUrl}/?success=true`,
-    cancel_url: `${appUrl}/?canceled=true`,
+
+    // Include session_id for optional client-side refresh/verification
+    success_url: `${appUrl}/?success=1&session_id={CHECKOUT_SESSION_ID}`,
+    cancel_url: `${appUrl}/?canceled=1`,
   })
 
   return NextResponse.json({ url: checkout.url })

@@ -1,119 +1,114 @@
+// app/api/webhook/stripe/route.ts
 import { NextResponse } from "next/server"
-import { headers } from "next/headers"
 import { prisma } from "@/lib/prisma"
-import { stripe } from "@/lib/stripe"
+import { getStripe } from "@/lib/stripe"
 
 export const runtime = "nodejs"
+export const dynamic = "force-dynamic"
 
 export async function POST(req: Request) {
-  const sig = (await headers()).get("stripe-signature")
-  if (!sig) return NextResponse.json({ error: "Missing Stripe signature" }, { status: 400 })
+  const stripe = getStripe()
+
+  const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET
+  if (!webhookSecret) {
+    return NextResponse.json({ error: "Missing STRIPE_WEBHOOK_SECRET" }, { status: 500 })
+  }
+
+  const signature = req.headers.get("stripe-signature")
+  if (!signature) {
+    return NextResponse.json({ error: "Missing stripe-signature" }, { status: 400 })
+  }
 
   const body = await req.text()
 
   let event: any
   try {
-    event = stripe.webhooks.constructEvent(body, sig, process.env.STRIPE_WEBHOOK_SECRET!)
+    event = stripe.webhooks.constructEvent(body, signature, webhookSecret)
   } catch (err: any) {
-    console.error("❌ Stripe signature verify failed:", err?.message)
-    return NextResponse.json({ error: "Bad signature" }, { status: 400 })
+    return NextResponse.json(
+      { error: `Webhook Error: ${err?.message ?? "Unknown"}` },
+      { status: 400 }
+    )
   }
 
   try {
-    if (event.type === "checkout.session.completed") {
-      const session = event.data.object as any
+    switch (event.type) {
+      case "checkout.session.completed": {
+        const session = event.data.object as any
 
-      const userId =
-        (session.client_reference_id as string | null) ??
-        (session.metadata?.userId as string | null) ??
-        null
+        // We set this in checkout route metadata: { userId: user.id }
+        const userId = session?.metadata?.userId || session?.client_reference_id
+        const customerId = session?.customer
+        const subscriptionId = session?.subscription
 
-      const customerId = (session.customer as string | null) ?? null
-      const subscriptionId = (session.subscription as string | null) ?? null
-
-      console.log("✅ checkout.session.completed", { userId, customerId, subscriptionId })
-
-      if (userId && customerId) {
-        await prisma.user.update({
-          where: { id: userId },
-          data: { stripeCustomerId: customerId },
-        })
+        if (typeof userId === "string" && userId.length > 0) {
+          await prisma.user.update({
+            where: { id: userId },
+            data: {
+              isPremium: true,
+              stripeCustomerId: typeof customerId === "string" ? customerId : undefined,
+              stripeSubscriptionId: typeof subscriptionId === "string" ? subscriptionId : undefined,
+            },
+          })
+        }
+        break
       }
 
-      // Flip premium immediately by reading the subscription
-      if (userId && subscriptionId) {
-        const subResp = await stripe.subscriptions.retrieve(subscriptionId)
+      case "customer.subscription.created":
+      case "customer.subscription.updated": {
+        const sub = event.data.object as any
 
-// Stripe types in your version wrap the object; use a safe unwrap.
-const sub: any = (subResp as any)?.data ?? subResp
+        const subscriptionId = sub?.id as string | undefined
+        const customerId = sub?.customer
+        const priceId = sub?.items?.data?.[0]?.price?.id ?? null
 
-const isActive = sub.status === "active" || sub.status === "trialing"
-const priceId = sub.items?.data?.[0]?.price?.id ?? null
+        // Stripe sends this as unix timestamp seconds
+        const periodEnd = sub?.current_period_end as number | undefined
 
-const periodEndUnix = sub.current_period_end as number | undefined
-const periodEnd = typeof periodEndUnix === "number" ? new Date(periodEndUnix * 1000) : null
+        if (typeof subscriptionId === "string" && subscriptionId.length > 0) {
+          await prisma.user.updateMany({
+            where: { stripeSubscriptionId: subscriptionId },
+            data: {
+              isPremium: sub?.status === "active" || sub?.status === "trialing",
+              stripePriceId: typeof priceId === "string" ? priceId : null,
+              stripeCurrentPeriodEnd: typeof periodEnd === "number" ? new Date(periodEnd * 1000) : null,
+              stripeCustomerId: typeof customerId === "string" ? customerId : null,
+            },
+          })
+        }
 
-
-        await prisma.user.update({
-          where: { id: userId },
-          data: {
-            isPremium: isActive,
-            stripeSubscriptionId: sub.id,
-            stripePriceId: priceId,
-            stripeCurrentPeriodEnd: periodEnd,
-          },
-        })
-
-        console.log("✅ Premium updated for user", { userId, isActive })
+        break
       }
 
-      return NextResponse.json({ received: true })
-    }
+      case "customer.subscription.deleted": {
+        const sub = event.data.object as any
+        const subscriptionId = sub?.id as string | undefined
 
-    if (event.type === "customer.subscription.updated" || event.type === "customer.subscription.created") {
-      const sub = event.data.object as any
-      const customerId = sub.customer as string
-      const isActive = sub.status === "active" || sub.status === "trialing"
-      const priceId = sub.items?.data?.[0]?.price?.id ?? null
-      const periodEnd = sub.current_period_end ? new Date(sub.current_period_end * 1000) : null
+        if (typeof subscriptionId === "string" && subscriptionId.length > 0) {
+          await prisma.user.updateMany({
+            where: { stripeSubscriptionId: subscriptionId },
+            data: {
+              isPremium: false,
+              stripeSubscriptionId: null,
+              stripePriceId: null,
+              stripeCurrentPeriodEnd: null,
+            },
+          })
+        }
 
-      // Primary update by customerId (works after checkout stored it)
-      const updated = await prisma.user.updateMany({
-        where: { stripeCustomerId: customerId },
-        data: {
-          isPremium: isActive,
-          stripeSubscriptionId: sub.id,
-          stripePriceId: priceId,
-          stripeCurrentPeriodEnd: periodEnd,
-        },
-      })
+        break
+      }
 
-      console.log("✅ subscription event updateMany", { customerId, updated: updated.count, isActive })
-
-      return NextResponse.json({ received: true })
-    }
-
-    if (event.type === "customer.subscription.deleted") {
-      const sub = event.data.object as any
-      const customerId = sub.customer as string
-
-      await prisma.user.updateMany({
-        where: { stripeCustomerId: customerId },
-        data: {
-          isPremium: false,
-          stripeSubscriptionId: null,
-          stripePriceId: null,
-          stripeCurrentPeriodEnd: null,
-        },
-      })
-
-      console.log("✅ subscription deleted", { customerId })
-      return NextResponse.json({ received: true })
+      default:
+        // ignore other event types
+        break
     }
 
     return NextResponse.json({ received: true })
   } catch (err: any) {
-    console.error("❌ Webhook handler failed:", err?.message || err)
-    return NextResponse.json({ error: "Webhook handler failed" }, { status: 500 })
+    return NextResponse.json(
+      { error: err?.message ?? "Webhook handler failed" },
+      { status: 500 }
+    )
   }
 }
