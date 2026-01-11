@@ -1,12 +1,29 @@
 // lib/prisma.ts
 import { PrismaClient } from "@prisma/client"
 
-const globalForPrisma = globalThis as unknown as { prisma?: PrismaClient }
+declare global {
+  // eslint-disable-next-line no-var
+  var __prisma: PrismaClient | undefined
+}
 
-export const prisma =
-  globalForPrisma.prisma ??
-  new PrismaClient({
+function createPrismaClient() {
+  // Don't construct PrismaClient unless DATABASE_URL exists (prevents build-time crash)
+  const url = process.env.DATABASE_URL
+  if (!url) {
+    throw new Error("Missing DATABASE_URL")
+  }
+
+  return new PrismaClient({
     log: process.env.NODE_ENV === "development" ? ["error", "warn"] : ["error"],
   })
+}
 
-if (process.env.NODE_ENV !== "production") globalForPrisma.prisma = prisma
+/**
+ * Lazy Prisma getter so importing this file never creates a PrismaClient during build.
+ */
+export function getPrisma() {
+  if (global.__prisma) return global.__prisma
+  const client = createPrismaClient()
+  if (process.env.NODE_ENV !== "production") global.__prisma = client
+  return client
+}
