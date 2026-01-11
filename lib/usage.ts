@@ -1,12 +1,12 @@
 // lib/usage.ts
-import { prisma } from "@/lib/prisma"
+import { getPrisma } from "@/lib/prisma"
 
 export function weekKeyMondayUTC(date = new Date()) {
-  // Monday-based week key in UTC: YYYY-MM-DD of Monday
+  // Monday-based week key in UTC, format YYYY-MM-DD (the Monday date)
   const d = new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()))
-  const day = d.getUTCDay() // 0=Sun ... 6=Sat
-  const diffToMonday = (day + 6) % 7 // Mon->0, Tue->1, ... Sun->6
-  d.setUTCDate(d.getUTCDate() - diffToMonday)
+  const day = d.getUTCDay() // 0=Sun,1=Mon,...
+  const diff = (day + 6) % 7 // Mon -> 0, Tue -> 1, ... Sun -> 6
+  d.setUTCDate(d.getUTCDate() - diff)
 
   const y = d.getUTCFullYear()
   const m = String(d.getUTCMonth() + 1).padStart(2, "0")
@@ -15,6 +15,7 @@ export function weekKeyMondayUTC(date = new Date()) {
 }
 
 export async function getWeeklyUsage(userId: string, weekKey: string) {
+  const prisma = getPrisma()
   const row = await prisma.weeklyUsage.findUnique({
     where: { userId_weekKey: { userId, weekKey } },
     select: { used: true },
@@ -23,21 +24,28 @@ export async function getWeeklyUsage(userId: string, weekKey: string) {
 }
 
 /**
- * Atomically "reserves" 1 usage for this user/week.
- * Returns ok=false if user is already at/over limit.
+ * Reserve 1 usage for the current week for a free user.
+ * Returns ok=false if already at/over limit.
  */
 export async function reserveWeeklyUsage(opts: { userId: string; limit: number }) {
+  const prisma = getPrisma()
   const weekKey = weekKeyMondayUTC()
 
+  // Do it transactionally to avoid race conditions under concurrency
   const result = await prisma.$transaction(async (tx) => {
     const existing = await tx.weeklyUsage.findUnique({
       where: { userId_weekKey: { userId: opts.userId, weekKey } },
-      select: { id: true, used: true },
+      select: { used: true },
     })
 
-    const usedNow = existing?.used ?? 0
-    if (usedNow >= opts.limit) {
-      return { ok: false as const, used: usedNow, remaining: 0, weekKey }
+    const usedBefore = existing?.used ?? 0
+    if (usedBefore >= opts.limit) {
+      return {
+        ok: false as const,
+        weekKey,
+        used: usedBefore,
+        remaining: 0,
+      }
     }
 
     const updated = await tx.weeklyUsage.upsert({
@@ -47,31 +55,42 @@ export async function reserveWeeklyUsage(opts: { userId: string; limit: number }
       select: { used: true },
     })
 
-    const remaining = Math.max(0, opts.limit - updated.used)
-    return { ok: true as const, used: updated.used, remaining, weekKey }
+    const usedAfter = updated.used
+    return {
+      ok: true as const,
+      weekKey,
+      used: usedAfter,
+      remaining: Math.max(0, opts.limit - usedAfter),
+    }
   })
 
   return result
 }
 
 /**
- * If OpenAI fails after reserving, roll back that 1 usage.
+ * If OpenAI call fails after reserve, roll back the reservation for that weekKey.
+ * Best-effort: never throws.
  */
 export async function rollbackWeeklyUsage(userId: string, weekKey: string) {
-  await prisma.$transaction(async (tx) => {
-    const row = await tx.weeklyUsage.findUnique({
-      where: { userId_weekKey: { userId, weekKey } },
-      select: { used: true },
-    })
-    if (!row) return
-
-    if (row.used <= 1) {
-      await tx.weeklyUsage.delete({ where: { userId_weekKey: { userId, weekKey } } })
-    } else {
-      await tx.weeklyUsage.update({
+  try {
+    const prisma = getPrisma()
+    await prisma.$transaction(async (tx) => {
+      const row = await tx.weeklyUsage.findUnique({
         where: { userId_weekKey: { userId, weekKey } },
-        data: { used: { decrement: 1 } },
+        select: { id: true, used: true },
       })
-    }
-  })
+      if (!row) return
+
+      if (row.used <= 1) {
+        await tx.weeklyUsage.delete({ where: { id: row.id } })
+      } else {
+        await tx.weeklyUsage.update({
+          where: { id: row.id },
+          data: { used: { decrement: 1 } },
+        })
+      }
+    })
+  } catch {
+    // swallow
+  }
 }

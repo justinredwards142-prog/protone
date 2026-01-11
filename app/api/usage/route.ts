@@ -1,10 +1,11 @@
 import { NextResponse } from "next/server"
 import { getServerSession } from "next-auth/next"
 import { buildAuthOptions } from "@/auth"
-import { prisma } from "@/lib/prisma"
+import { getPrisma } from "@/lib/prisma"
 import { getWeeklyUsage, weekKeyMondayUTC } from "@/lib/usage"
 
 export const runtime = "nodejs"
+export const dynamic = "force-dynamic"
 
 const WEEKLY_LIMIT = 10
 
@@ -23,6 +24,8 @@ export async function GET() {
     return NextResponse.json(payload, { status: 401 })
   }
 
+  const prisma = getPrisma()
+
   const user = await prisma.user.findUnique({
     where: { email },
     select: { id: true, isPremium: true },
@@ -33,7 +36,9 @@ export async function GET() {
     return NextResponse.json(payload, { status: 401 })
   }
 
-  if (user.isPremium) {
+  const isPremium = Boolean(user.isPremium)
+
+  if (isPremium) {
     const payload: UsagePayload = { used: 0, limit: "Unlimited", remaining: "Unlimited", isPremium: true }
     return NextResponse.json(payload)
   }

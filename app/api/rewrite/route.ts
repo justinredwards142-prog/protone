@@ -2,10 +2,11 @@ import { NextResponse } from "next/server"
 import OpenAI from "openai"
 import { getServerSession } from "next-auth/next"
 import { buildAuthOptions } from "@/auth"
-import { prisma } from "@/lib/prisma"
+import { getPrisma } from "@/lib/prisma"
 import { reserveWeeklyUsage, rollbackWeeklyUsage } from "@/lib/usage"
 
 export const runtime = "nodejs"
+export const dynamic = "force-dynamic"
 
 const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY })
 
@@ -49,6 +50,8 @@ export async function POST(req: Request) {
     }
     return NextResponse.json(payload, { status: 401 })
   }
+
+  const prisma = getPrisma()
 
   const user = await prisma.user.findUnique({
     where: { email },

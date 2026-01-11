@@ -1,15 +1,19 @@
 import { NextResponse } from "next/server"
 import { getServerSession } from "next-auth/next"
 import { buildAuthOptions } from "@/auth"
-import { prisma } from "@/lib/prisma"
+import { getPrisma } from "@/lib/prisma"
 import { getStripe } from "@/lib/stripe"
 
 export const runtime = "nodejs"
+export const dynamic = "force-dynamic"
 
 export async function POST() {
   const session = await getServerSession(buildAuthOptions())
   const email = session?.user?.email
   if (!email) return NextResponse.json({ error: "Please sign in." }, { status: 401 })
+
+  const prisma = getPrisma()
+  const stripe = getStripe()
 
   const user = await prisma.user.findUnique({
     where: { email },
@@ -22,8 +26,6 @@ export async function POST() {
   if (!appUrl || !priceId) {
     return NextResponse.json({ error: "Missing APP_URL or STRIPE_PRICE_ID" }, { status: 500 })
   }
-
-  const stripe = getStripe()
 
   // Ensure customer exists + always has metadata.userId
   let customerId = user.stripeCustomerId
