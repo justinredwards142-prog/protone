@@ -5,7 +5,6 @@ import { getPrisma } from "@/lib/prisma"
 import { getStripe } from "@/lib/stripe"
 
 export const runtime = "nodejs"
-export const dynamic = "force-dynamic"
 
 export async function POST() {
   const session = await getServerSession(buildAuthOptions())
@@ -13,8 +12,6 @@ export async function POST() {
   if (!email) return NextResponse.json({ error: "Please sign in." }, { status: 401 })
 
   const prisma = getPrisma()
-  const stripe = getStripe()
-
   const user = await prisma.user.findUnique({
     where: { email },
     select: { id: true, email: true, stripeCustomerId: true, isPremium: true },
@@ -23,27 +20,17 @@ export async function POST() {
 
   const appUrl = process.env.APP_URL
   const priceId = process.env.STRIPE_PRICE_ID
-  if (!appUrl || !priceId) {
-    return NextResponse.json({ error: "Missing APP_URL or STRIPE_PRICE_ID" }, { status: 500 })
-  }
+  if (!appUrl || !priceId) return NextResponse.json({ error: "Missing APP_URL or STRIPE_PRICE_ID" }, { status: 500 })
 
-  // Ensure customer exists + always has metadata.userId
+  const stripe = getStripe()
+
   let customerId = user.stripeCustomerId
   if (!customerId) {
-    const customer = await stripe.customers.create({
-      email: user.email,
-      metadata: { userId: user.id },
-    })
+    const customer = await stripe.customers.create({ email: user.email, metadata: { userId: user.id } })
     customerId = customer.id
-    await prisma.user.update({
-      where: { id: user.id },
-      data: { stripeCustomerId: customerId },
-    })
+    await prisma.user.update({ where: { id: user.id }, data: { stripeCustomerId: customerId } })
   } else {
-    await stripe.customers.update(customerId, {
-      email: user.email,
-      metadata: { userId: user.id },
-    })
+    await stripe.customers.update(customerId, { email: user.email, metadata: { userId: user.id } })
   }
 
   const checkout = await stripe.checkout.sessions.create({

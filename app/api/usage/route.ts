@@ -5,7 +5,6 @@ import { getPrisma } from "@/lib/prisma"
 import { getWeeklyUsage, weekKeyMondayUTC } from "@/lib/usage"
 
 export const runtime = "nodejs"
-export const dynamic = "force-dynamic"
 
 const WEEKLY_LIMIT = 10
 
@@ -20,33 +19,30 @@ export async function GET() {
   const session = await getServerSession(buildAuthOptions())
   const email = session?.user?.email
   if (!email) {
-    const payload: UsagePayload = { used: 0, limit: WEEKLY_LIMIT, remaining: WEEKLY_LIMIT, isPremium: false }
-    return NextResponse.json(payload, { status: 401 })
+    return NextResponse.json({ used: 0, limit: WEEKLY_LIMIT, remaining: WEEKLY_LIMIT, isPremium: false } satisfies UsagePayload, {
+      status: 401,
+    })
   }
 
   const prisma = getPrisma()
-
   const user = await prisma.user.findUnique({
     where: { email },
     select: { id: true, isPremium: true },
   })
 
   if (!user) {
-    const payload: UsagePayload = { used: 0, limit: WEEKLY_LIMIT, remaining: WEEKLY_LIMIT, isPremium: false }
-    return NextResponse.json(payload, { status: 401 })
+    return NextResponse.json({ used: 0, limit: WEEKLY_LIMIT, remaining: WEEKLY_LIMIT, isPremium: false } satisfies UsagePayload, {
+      status: 401,
+    })
   }
 
-  const isPremium = Boolean(user.isPremium)
-
-  if (isPremium) {
-    const payload: UsagePayload = { used: 0, limit: "Unlimited", remaining: "Unlimited", isPremium: true }
-    return NextResponse.json(payload)
+  if (user.isPremium) {
+    return NextResponse.json({ used: 0, limit: "Unlimited", remaining: "Unlimited", isPremium: true } satisfies UsagePayload)
   }
 
   const weekKey = weekKeyMondayUTC()
   const used = await getWeeklyUsage(user.id, weekKey)
   const remaining = Math.max(0, WEEKLY_LIMIT - used)
 
-  const payload: UsagePayload = { used, limit: WEEKLY_LIMIT, remaining, isPremium: false }
-  return NextResponse.json(payload)
+  return NextResponse.json({ used, limit: WEEKLY_LIMIT, remaining, isPremium: false } satisfies UsagePayload)
 }

@@ -1,11 +1,10 @@
 generator client {
-  provider   = "prisma-client-js"
-  engineType = "library"
+  provider = "prisma-client-js"
 }
 
 datasource db {
   provider = "postgresql"
-  // url is configured in prisma.config.ts in Prisma 7
+  // URL is provided via prisma.config.ts (DATABASE_URL)
 }
 
 model User {
@@ -15,37 +14,40 @@ model User {
   emailVerified DateTime?
   image         String?
 
-  // Premium flag (webhook will set this)
-  isPremium Boolean @default(false)
-
-  // Stripe billing fields
+  // ─── Premium / Stripe ─────────────────────────────
+  isPremium              Boolean   @default(false)
   stripeCustomerId       String?   @unique
   stripeSubscriptionId   String?   @unique
   stripePriceId          String?
   stripeCurrentPeriodEnd DateTime?
 
+  // ─── Relations ────────────────────────────────────
   accounts    Account[]
   sessions    Session[]
   weeklyUsage WeeklyUsage[]
+
+  @@index([email])
 }
 
 model Account {
-  id                String  @id @default(cuid())
+  id                String @id @default(cuid())
   userId            String
   type              String
   provider          String
   providerAccountId String
-  refresh_token     String?
-  access_token      String?
-  expires_at        Int?
-  token_type        String?
-  scope             String?
-  id_token          String?
-  session_state     String?
+
+  refresh_token String?
+  access_token  String?
+  expires_at    Int?
+  token_type    String?
+  scope         String?
+  id_token      String?
+  session_state String?
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@unique([provider, providerAccountId])
+  @@index([userId])
 }
 
 model Session {
@@ -55,6 +57,8 @@ model Session {
   expires      DateTime
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
 }
 
 model VerificationToken {
@@ -73,5 +77,8 @@ model WeeklyUsage {
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
-  @@unique([userId, weekKey])
+  // Used by:
+  // where: { userId_weekKey: { userId, weekKey } }
+  @@unique([userId, weekKey], name: "userId_weekKey")
+  @@index([weekKey])
 }

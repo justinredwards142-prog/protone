@@ -9,10 +9,6 @@ function safeEnv(name: string) {
   return process.env[name] ?? ""
 }
 
-/**
- * Build NextAuth options at request time.
- * (Does not create Prisma client until a request actually hits NextAuth.)
- */
 export function buildAuthOptions(): NextAuthOptions {
   const prisma = getPrisma()
 

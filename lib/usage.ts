@@ -26,15 +26,27 @@ export async function getWeeklyUsage(userId: string, weekKey: string) {
 /**
  * Reserve 1 usage for the current week for a free user.
  * Returns ok=false if already at/over limit.
- *
- * Safe under concurrency: if we ever overshoot, we immediately roll back.
  */
 export async function reserveWeeklyUsage(opts: { userId: string; limit: number }) {
   const prisma = getPrisma()
   const weekKey = weekKeyMondayUTC()
 
   const result = await prisma.$transaction(async (tx) => {
-    // First try to increment (or create) atomically
+    const existing = await tx.weeklyUsage.findUnique({
+      where: { userId_weekKey: { userId: opts.userId, weekKey } },
+      select: { used: true },
+    })
+
+    const usedBefore = existing?.used ?? 0
+    if (usedBefore >= opts.limit) {
+      return {
+        ok: false as const,
+        weekKey,
+        used: usedBefore,
+        remaining: 0,
+      }
+    }
+
     const updated = await tx.weeklyUsage.upsert({
       where: { userId_weekKey: { userId: opts.userId, weekKey } },
       create: { userId: opts.userId, weekKey, used: 1 },
@@ -43,23 +55,6 @@ export async function reserveWeeklyUsage(opts: { userId: string; limit: number }
     })
 
     const usedAfter = updated.used
-
-    // If we overshot the limit due to concurrency, roll back immediately
-    if (usedAfter > opts.limit) {
-      await tx.weeklyUsage.update({
-        where: { userId_weekKey: { userId: opts.userId, weekKey } },
-        data: { used: { decrement: 1 } },
-      })
-
-      const usedFinal = usedAfter - 1
-      return {
-        ok: false as const,
-        weekKey,
-        used: usedFinal,
-        remaining: Math.max(0, opts.limit - usedFinal),
-      }
-    }
-
     return {
       ok: true as const,
       weekKey,
@@ -81,17 +76,15 @@ export async function rollbackWeeklyUsage(userId: string, weekKey: string) {
     await prisma.$transaction(async (tx) => {
       const row = await tx.weeklyUsage.findUnique({
         where: { userId_weekKey: { userId, weekKey } },
-        select: { used: true },
+        select: { id: true, used: true },
       })
       if (!row) return
 
       if (row.used <= 1) {
-        await tx.weeklyUsage.delete({
-          where: { userId_weekKey: { userId, weekKey } },
-        })
+        await tx.weeklyUsage.delete({ where: { id: row.id } })
       } else {
         await tx.weeklyUsage.update({
-          where: { userId_weekKey: { userId, weekKey } },
+          where: { id: row.id },
           data: { used: { decrement: 1 } },
         })
       }
