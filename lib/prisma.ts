@@ -1,28 +1,23 @@
 // lib/prisma.ts
 import { PrismaClient } from "@prisma/client"
 import { PrismaNeon } from "@prisma/adapter-neon"
-import { Pool, neonConfig } from "@neondatabase/serverless"
-import { WebSocket } from "ws"
+import { neonConfig } from "@neondatabase/serverless"
+
+// In Node (Vercel serverless), Neon serverless driver needs ws
+import ws from "ws"
+neonConfig.webSocketConstructor = ws
 
 declare global {
   // eslint-disable-next-line no-var
   var __prisma: PrismaClient | undefined
-  // eslint-disable-next-line no-var
-  var __neonPool: Pool | undefined
 }
 
-function makePrisma() {
-  const connectionString = process.env.DATABASE_URL
-  if (!connectionString) throw new Error("Missing DATABASE_URL")
+function createPrismaClient() {
+  const url = process.env.DATABASE_URL
+  if (!url) throw new Error("Missing DATABASE_URL")
 
-  // Neon serverless config (works in Vercel Node runtime)
-  neonConfig.webSocketConstructor = WebSocket
-  neonConfig.poolQueryViaFetch = true
-
-  const pool = global.__neonPool ?? new Pool({ connectionString })
-  if (process.env.NODE_ENV !== "production") global.__neonPool = pool
-
-  const adapter = new PrismaNeon(pool)
+  // ✅ IMPORTANT: pass PoolConfig / connectionString into PrismaNeon
+  const adapter = new PrismaNeon({ connectionString: url })
 
   return new PrismaClient({
     adapter,
@@ -32,7 +27,7 @@ function makePrisma() {
 
 export function getPrisma() {
   if (global.__prisma) return global.__prisma
-  const prisma = makePrisma()
-  if (process.env.NODE_ENV !== "production") global.__prisma = prisma
-  return prisma
+  const client = createPrismaClient()
+  if (process.env.NODE_ENV !== "production") global.__prisma = client
+  return client
 }
