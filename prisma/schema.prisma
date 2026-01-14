@@ -82,3 +82,13 @@ model WeeklyUsage {
   @@unique([userId, weekKey], name: "userId_weekKey")
   @@index([weekKey])
 }
+
+model RateLimit {
+  id      String   @id @default(cuid())
+  key     String   @unique
+  count   Int      @default(0)
+  resetAt DateTime
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
