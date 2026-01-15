@@ -1,3 +1,4 @@
+// app/api/rewrite/route.ts
 import { NextResponse } from "next/server"
 import OpenAI from "openai"
 import { getServerSession } from "next-auth/next"
@@ -5,6 +6,7 @@ import { buildAuthOptions } from "@/auth"
 import { getPrisma } from "@/lib/prisma"
 import { reserveWeeklyUsage, rollbackWeeklyUsage } from "@/lib/usage"
 import { enforceRateLimit } from "@/lib/ratelimit"
+import type { RLResult } from "@/lib/ratelimit"
 
 export const runtime = "nodejs"
 
@@ -39,8 +41,13 @@ function cleanStr(v: unknown, max = 6000) {
 // Best-effort: identify caller IP (Vercel / proxies)
 function getClientIp(req: Request) {
   const xf = req.headers.get("x-forwarded-for")
-  if (xf) return xf.split(",")[0]?.trim()
+  if (xf) return xf.split(",")[0]?.trim() || "unknown"
   return req.headers.get("x-real-ip") ?? "unknown"
+}
+
+// ✅ Type guard so TS knows reset exists in the blocked case
+function isBlocked(x: RLResult): x is Extract<RLResult, { ok: false }> {
+  return x.ok === false
 }
 
 export async function POST(req: Request) {
@@ -70,27 +77,28 @@ export async function POST(req: Request) {
 
   const isPremium = Boolean(user.isPremium)
 
-  // 3) Rate limit (do this BEFORE reserving weekly usage / calling OpenAI)
-  // Per-user key (strong)
+  // 3) Rate limit BEFORE reserving weekly usage / calling OpenAI
+  // Per-user (strong)
   const perUserKey = `rewrite:user:${user.id}`
-  const rl1 = await enforceRateLimit(perUserKey)
-console.log("[RL:user]", perUserKey, rl1)
+  const rlUser = await enforceRateLimit(perUserKey, { limit: 10, windowSeconds: 60 })
+  console.log("[RL:user]", perUserKey, rlUser)
 
-  if (!rl1.ok) {
-    // Optional: add Retry-After header (seconds). reset is ms timestamp.
-    const retryAfterSec = Math.max(1, Math.ceil((rl1.reset - Date.now()) / 1000))
+  if (isBlocked(rlUser)) {
+    const retryAfterSec = Math.max(1, Math.ceil((rlUser.reset - Date.now()) / 1000))
     return NextResponse.json(
       { error: "Too many requests. Please slow down." } satisfies RewritePayload,
       { status: 429, headers: { "Retry-After": String(retryAfterSec) } }
     )
   }
 
-  // Optional extra shield: also rate-limit by IP (helps if account sharing / bots)
+  // Optional extra shield: per-IP
   const ip = getClientIp(req)
   const perIpKey = `rewrite:ip:${ip}`
-  const rl2 = await enforceRateLimit(perIpKey)
-  if (!rl2.ok) {
-    const retryAfterSec = Math.max(1, Math.ceil((rl2.reset - Date.now()) / 1000))
+  const rlIp = await enforceRateLimit(perIpKey, { limit: 30, windowSeconds: 60 })
+  console.log("[RL:ip]", perIpKey, rlIp)
+
+  if (isBlocked(rlIp)) {
+    const retryAfterSec = Math.max(1, Math.ceil((rlIp.reset - Date.now()) / 1000))
     return NextResponse.json(
       { error: "Too many requests. Please slow down." } satisfies RewritePayload,
       { status: 429, headers: { "Retry-After": String(retryAfterSec) } }
@@ -167,7 +175,6 @@ console.log("[RL:user]", perUserKey, rl1)
 
     return NextResponse.json({ result, used, limit, remaining, isPremium } satisfies RewritePayload)
   } catch {
-    // Roll back weekly usage reservation if OpenAI fails
     if (reserved && reservedWeekKey) await rollbackWeeklyUsage(user.id, reservedWeekKey)
     return NextResponse.json({ error: "Failed to rewrite." } satisfies RewritePayload, { status: 500 })
   }
