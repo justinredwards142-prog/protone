@@ -29,8 +29,8 @@ export async function enforceRateLimit(
   const limit = opts?.limit ?? 5
   const windowSeconds = Math.max(1, opts?.windowSeconds ?? 60)
 
-  // Runtime accepts this; TS typings are wrong → cast is intentional
-  const duration = [windowSeconds, "s"] as any
+  // IMPORTANT: Upstash expects a string duration (it calls .match() on it)
+  const duration = `${windowSeconds} s` as any
 
   const ratelimit = new Ratelimit({
     redis,
@@ -41,9 +41,6 @@ export async function enforceRateLimit(
 
   const res = await ratelimit.limit(key)
 
-  if (!res.success) {
-    return { ok: false, reset: res.reset }
-  }
-
+  if (!res.success) return { ok: false, reset: res.reset }
   return { ok: true }
 }

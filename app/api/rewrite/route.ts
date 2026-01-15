@@ -5,8 +5,7 @@ import { getServerSession } from "next-auth/next"
 import { buildAuthOptions } from "@/auth"
 import { getPrisma } from "@/lib/prisma"
 import { reserveWeeklyUsage, rollbackWeeklyUsage } from "@/lib/usage"
-import { enforceRateLimit } from "@/lib/ratelimit"
-import type { RLResult } from "@/lib/ratelimit"
+import { enforceRateLimit, type RLResult } from "@/lib/ratelimit"
 
 export const runtime = "nodejs"
 
@@ -45,7 +44,7 @@ function getClientIp(req: Request) {
   return req.headers.get("x-real-ip") ?? "unknown"
 }
 
-// ✅ Type guard so TS knows reset exists in the blocked case
+// Type guard so TS knows reset exists in the blocked case
 function isBlocked(x: RLResult): x is Extract<RLResult, { ok: false }> {
   return x.ok === false
 }
@@ -78,9 +77,11 @@ export async function POST(req: Request) {
   const isPremium = Boolean(user.isPremium)
 
   // 3) Rate limit BEFORE reserving weekly usage / calling OpenAI
-  // Per-user (strong)
+  // Use lower numbers temporarily to prove it’s working:
+  // - Per-user: 5/min
+  // - Per-IP: 10/min
   const perUserKey = `rewrite:user:${user.id}`
-  const rlUser = await enforceRateLimit(perUserKey, { limit: 10, windowSeconds: 60 })
+  const rlUser = await enforceRateLimit(perUserKey, { limit: 5, windowSeconds: 60 })
   console.log("[RL:user]", perUserKey, rlUser)
 
   if (isBlocked(rlUser)) {
@@ -91,10 +92,9 @@ export async function POST(req: Request) {
     )
   }
 
-  // Optional extra shield: per-IP
   const ip = getClientIp(req)
   const perIpKey = `rewrite:ip:${ip}`
-  const rlIp = await enforceRateLimit(perIpKey, { limit: 30, windowSeconds: 60 })
+  const rlIp = await enforceRateLimit(perIpKey, { limit: 10, windowSeconds: 60 })
   console.log("[RL:ip]", perIpKey, rlIp)
 
   if (isBlocked(rlIp)) {
