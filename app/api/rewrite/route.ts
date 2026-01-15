@@ -4,6 +4,7 @@ import { getServerSession } from "next-auth/next"
 import { buildAuthOptions } from "@/auth"
 import { getPrisma } from "@/lib/prisma"
 import { reserveWeeklyUsage, rollbackWeeklyUsage } from "@/lib/usage"
+import { enforceRateLimit } from "@/lib/ratelimit"
 
 export const runtime = "nodejs"
 
@@ -35,7 +36,15 @@ function cleanStr(v: unknown, max = 6000) {
   return v.trim().slice(0, max)
 }
 
+// Best-effort: identify caller IP (Vercel / proxies)
+function getClientIp(req: Request) {
+  const xf = req.headers.get("x-forwarded-for")
+  if (xf) return xf.split(",")[0]?.trim()
+  return req.headers.get("x-real-ip") ?? "unknown"
+}
+
 export async function POST(req: Request) {
+  // 1) Must be signed in
   const session = await getServerSession(buildAuthOptions())
   const email = session?.user?.email
   if (!email) {
@@ -45,6 +54,7 @@ export async function POST(req: Request) {
     )
   }
 
+  // 2) Resolve user
   const prisma = getPrisma()
   const user = await prisma.user.findUnique({
     where: { email },
@@ -59,6 +69,34 @@ export async function POST(req: Request) {
   }
 
   const isPremium = Boolean(user.isPremium)
+
+  // 3) Rate limit (do this BEFORE reserving weekly usage / calling OpenAI)
+  // Per-user key (strong)
+  const perUserKey = `rewrite:user:${user.id}`
+  const rl1 = await enforceRateLimit(perUserKey)
+console.log("[RL:user]", perUserKey, rl1)
+
+  if (!rl1.ok) {
+    // Optional: add Retry-After header (seconds). reset is ms timestamp.
+    const retryAfterSec = Math.max(1, Math.ceil((rl1.reset - Date.now()) / 1000))
+    return NextResponse.json(
+      { error: "Too many requests. Please slow down." } satisfies RewritePayload,
+      { status: 429, headers: { "Retry-After": String(retryAfterSec) } }
+    )
+  }
+
+  // Optional extra shield: also rate-limit by IP (helps if account sharing / bots)
+  const ip = getClientIp(req)
+  const perIpKey = `rewrite:ip:${ip}`
+  const rl2 = await enforceRateLimit(perIpKey)
+  if (!rl2.ok) {
+    const retryAfterSec = Math.max(1, Math.ceil((rl2.reset - Date.now()) / 1000))
+    return NextResponse.json(
+      { error: "Too many requests. Please slow down." } satisfies RewritePayload,
+      { status: 429, headers: { "Retry-After": String(retryAfterSec) } }
+    )
+  }
+
   let reserved = false
   let reservedWeekKey = ""
 
@@ -76,6 +114,7 @@ export async function POST(req: Request) {
     const toneOk = mode === "normal" ? NORMAL_TONES.has(tone) : FUN_TONES.has(tone)
     if (!toneOk) return NextResponse.json({ error: "Invalid tone for selected mode." } satisfies RewritePayload, { status: 400 })
 
+    // 4) Weekly limit (free users only)
     let used = 0
     let remaining: number | "Unlimited" = WEEKLY_LIMIT
     let limit: number | "Unlimited" = WEEKLY_LIMIT
@@ -100,11 +139,19 @@ export async function POST(req: Request) {
       limit = "Unlimited"
     }
 
+    // 5) Call OpenAI
     const system =
       "You rewrite messages. Output ONLY the rewritten message. " +
       "Preserve key details, names, dates, and intent. Do not add disclaimers."
 
-    const userPrompt = [`Recipient: ${recipient}`, `Mode: ${mode}`, `Tone: ${tone}`, "", "Message to rewrite:", input].join("\n")
+    const userPrompt = [
+      `Recipient: ${recipient}`,
+      `Mode: ${mode}`,
+      `Tone: ${tone}`,
+      "",
+      "Message to rewrite:",
+      input,
+    ].join("\n")
 
     const response = await client.chat.completions.create({
       model: "gpt-4o-mini",
@@ -120,6 +167,7 @@ export async function POST(req: Request) {
 
     return NextResponse.json({ result, used, limit, remaining, isPremium } satisfies RewritePayload)
   } catch {
+    // Roll back weekly usage reservation if OpenAI fails
     if (reserved && reservedWeekKey) await rollbackWeeklyUsage(user.id, reservedWeekKey)
     return NextResponse.json({ error: "Failed to rewrite." } satisfies RewritePayload, { status: 500 })
   }
