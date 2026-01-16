@@ -1,21 +1,18 @@
 // lib/prisma.ts
 import { PrismaClient } from "@prisma/client"
 import { PrismaNeon } from "@prisma/adapter-neon"
-import { neonConfig } from "@neondatabase/serverless"
 
 declare global {
   // eslint-disable-next-line no-var
   var __prisma: PrismaClient | undefined
 }
 
-function createPrismaClient() {
-  const connectionString = process.env.DATABASE_URL
-  if (!connectionString) throw new Error("Missing DATABASE_URL")
+function makeClient() {
+  const url = process.env.DATABASE_URL
+  if (!url) throw new Error("Missing DATABASE_URL")
 
-  // Use fetch transport (avoids ws/bufferutil issues on serverless)
-  neonConfig.poolQueryViaFetch = true
-
-  const adapter = new PrismaNeon({ connectionString })
+  // PrismaNeon expects a PoolConfig-style object in this version
+  const adapter = new PrismaNeon({ connectionString: url })
 
   return new PrismaClient({
     adapter,
@@ -23,12 +20,9 @@ function createPrismaClient() {
   })
 }
 
-/**
- * Lazy getter so importing this file never connects during build.
- */
 export function getPrisma() {
   if (global.__prisma) return global.__prisma
-  const client = createPrismaClient()
+  const client = makeClient()
   if (process.env.NODE_ENV !== "production") global.__prisma = client
   return client
 }

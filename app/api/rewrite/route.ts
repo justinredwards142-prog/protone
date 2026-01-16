@@ -82,7 +82,7 @@ export async function POST(req: Request) {
   // - Per-IP: 10/min
   const perUserKey = `rewrite:user:${user.id}`
   const rlUser = await enforceRateLimit(perUserKey, { limit: 15, windowSeconds: 60 })
-  console.log("[RL:user]", perUserKey, rlUser)
+ // console.log("[RL:user]", perUserKey, rlUser)
 
   if (isBlocked(rlUser)) {
     const retryAfterSec = Math.max(1, Math.ceil((rlUser.reset - Date.now()) / 1000))
@@ -95,7 +95,7 @@ export async function POST(req: Request) {
   const ip = getClientIp(req)
   const perIpKey = `rewrite:ip:${ip}`
   const rlIp = await enforceRateLimit(perIpKey, { limit: 50, windowSeconds: 60 })
-  console.log("[RL:ip]", perIpKey, rlIp)
+ // console.log("[RL:ip]", perIpKey, rlIp)
 
   if (isBlocked(rlIp)) {
     const retryAfterSec = Math.max(1, Math.ceil((rlIp.reset - Date.now()) / 1000))
